@@ -16,19 +16,19 @@ ECIO_FILE = "/sys/kernel/debug/ec/ec0/io"
 IPC_FILE = "/tmp/omen-fand.PID"
 DEVICE_FILE = "/sys/devices/virtual/dmi/id/product_name"
 CONFIG_FILE = "/etc/omen-fan/config.toml"
-BOOST_FILE = glob.glob("/sys/devices/platform/hp-wmi/hwmon/*/pwm1_enable")[0]
-FAN1_SPEED_FILE = glob.glob("/sys/devices/platform/hp-wmi/hwmon/*/fan1_input")[0]
-FAN2_SPEED_FILE = glob.glob("/sys/devices/platform/hp-wmi/hwmon/*/fan2_input")[0]
+BOOST_FILE = None
+FAN1_SPEED_FILE = None
+FAN2_SPEED_FILE = None
 
-FAN1_OFFSET = 52  # 0x34
-FAN2_OFFSET = 53  # 0x35
-BIOS_OFFSET = 98  # 0x62
-TIMER_OFFSET = 99  # 0x63
-BOOST_OFFSET = 236  # 0xEC
+FAN1_OFFSET = 73  # 0x49
+FAN2_OFFSET = 74  # 0x4A
+BIOS_OFFSET = None
+TIMER_OFFSET = None
+BOOST_OFFSET = None
 
-FAN1_SPEED_MAX = 55
-FAN2_SPEED_MAX = 57
-DEVICE_LIST = ["OMEN by HP Laptop 16"]
+FAN1_SPEED_MAX = None
+FAN2_SPEED_MAX = None
+DEVICE_LIST = ["Nitro AN16-42"]
 
 
 def is_root(state=0):
@@ -105,7 +105,7 @@ def load_ec_module():
 
 def update_fan(speed1, speed2):
     bios_control(False)
-    print(f"  Set Fan1: {speed1*100} RPM, Set Fan2: {speed2*100} RPM")
+    print(f"  Set Fan1: {speed1}%, Set Fan2: {speed2}%")
     with open(ECIO_FILE, "r+b") as ec:
         ec.seek(FAN1_OFFSET)
         ec.write(bytes([speed1]))
@@ -114,6 +114,10 @@ def update_fan(speed1, speed2):
 
 
 def bios_control(enabled):
+    if BIOS_OFFSET is None:
+        print("  ERROR: BIOS Control is not supported on this system")
+        return
+
     if enabled is False:
         print("  WARNING: BIOS Fan Control Disabled")
         with open(ECIO_FILE, "r+b") as ec:
@@ -151,15 +155,9 @@ def parse_rpm(rpm, fan, max_speed):
         print(f"  ERROR: '{rpm}' is not a valid percentage.")
         sys.exit(1)
     elif is_percent == 1:
-        return int(max_speed * rpm / 100)
-    elif 0 <= rpm <= max_speed:
         return int(rpm)
     else:
-        print(
-            f"  ERROR: '{rpm}' is not a valid RPM/100 value for Fan{fan}. Min: 0 Max: {max_speed}"
-        )
-        sys.exit(1)
-
+        print(f"  ERROR: '{rpm}' is not a percentage.")
 
 startup_check()
 
@@ -180,6 +178,10 @@ def bios_control_cli(arg):
 @cli.command(name="boost", aliases=["x"], help="Enables boost mode via sysfs")
 @click.argument("arg", type=bool)
 def boost_cli(arg):
+    if BOOST_FILE == None:
+        print("  ERROR: Boost mode is not supported on this system")
+        sys.exit(1)
+
     is_root()
     load_ec_module()
     if arg is False:
@@ -284,7 +286,9 @@ def info_cli():
             print("  BIOS Control : Disabled")
     else:
         print("  Service Status : Stopped")
-        if is_root(1):
+        if BIOS_OFFSET is None:
+            print("  BIOS Control : Unsupported")
+        elif is_root(1):
             load_ec_module()
             with open(ECIO_FILE, "rb") as ec:
                 ec.seek(BIOS_OFFSET)
@@ -295,22 +299,36 @@ def info_cli():
         else:
             print("  BIOS Control : Unknown (Need root)")
 
-    with open(FAN1_SPEED_FILE, "r", encoding="utf-8") as fan1:
-        print(f"  Fan 1 : {fan1.read().strip()} RPM")
-    with open(FAN2_SPEED_FILE, "r", encoding="utf-8") as fan2:
-        print(f"  Fan 2 : {fan2.read().strip()} RPM")
+    if FAN1_SPEED_FILE is None:
+        with open(ECIO_FILE, "rb") as ec:
+            ec.seek(FAN1_OFFSET)
+            print(f"  Fan 1 Target : {int.from_bytes(ec.read(1), "big")}%")
+    else: 
+        with open(FAN1_SPEED_FILE, "r", encoding="utf-8") as fan1:
+            print(f"  Fan 1 : {fan1.read().strip()} RPM")
 
-    with open(BOOST_FILE, "r", encoding="utf-8") as boost:
-        if boost.read().strip() == "0":
-            print("\n  Fan Boost : Enabled")
-            print("  Fan speeds are now maxed. BIOS and User controls are ignored")
+    if FAN2_SPEED_FILE is None:
+        with open(ECIO_FILE, "rb") as ec:
+            ec.seek(FAN2_OFFSET)
+            print(f"  Fan 2 Target : {int.from_bytes(ec.read(1), "big")}%")
+    else:
+        with open(FAN2_SPEED_FILE, "r", encoding="utf-8") as fan2:
+            print(f"  Fan 2 : {fan2.read().strip()} RPM")
+
+    if BOOST_FILE is None:
+        print("  Fan Boost : Unsupported")
+    else:
+        with open(BOOST_FILE, "r", encoding="utf-8") as boost:
+            if boost.read().strip() == "0":
+                print("\n  Fan Boost : Enabled")
+                print("  Fan speeds are now maxed. BIOS and User controls are ignored")
 
 
 @cli.command(
     name="set",
     aliases=["s"],
     help="Set Fan Speed (Disables BIOS control) \n\
-    Fan speed can be set in Percentage (100%) or RPM/100 (55)",
+    Fan speed can be set in Percentage (100%))",
 )
 @click.argument("arg1", type=str)
 @click.argument("arg2", type=str, required=False)

@@ -11,15 +11,15 @@ ECIO_FILE = "/sys/kernel/debug/ec/ec0/io"
 IPC_FILE = "/tmp/omen-fand.PID"
 CONFIG_FILE = "/etc/omen-fan/config.toml"
 
-FAN1_OFFSET = 52  # 0x34
-FAN2_OFFSET = 53  # 0x35
-BIOS_OFFSET = 98  # 0x62
-TIMER_OFFSET = 99  # 0x63
-CPU_TEMP_OFFSET = 87  # 0x57
-GPU_TEMP_OFFSET = 183  # 0xB7
+FAN1_OFFSET = 73  # 0x49
+FAN2_OFFSET = 74  # 0x4A
+BIOS_OFFSET = None
+TIMER_OFFSET = None
+CPU_TEMP_OFFSET = 88  # 0x58
+GPU_TEMP_OFFSET = 89  # 0x59
 
-FAN1_MAX = 55
-FAN2_MAX = 57
+FAN1_MAX = None
+FAN2_MAX = None
 
 with open(CONFIG_FILE, "r") as file:
     doc = tomlkit.loads(file.read())
@@ -68,6 +68,8 @@ def get_temp():
 
 
 def bios_control(enabled):
+    if BIOS_OFFSET is None:
+        return
     if enabled is False:
         with open(ECIO_FILE, "r+b") as ec:
             ec.seek(BIOS_OFFSET)
@@ -109,7 +111,7 @@ while True:
 
     if speed_old != speed:
         speed_old = speed
-        update_fan(FAN1_MAX * speed / 100, FAN2_MAX * speed / 100)
+        update_fan(speed, speed)
 
     bios_control(False)
     sleep(POLL_INTERVAL)
