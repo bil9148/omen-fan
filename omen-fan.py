@@ -13,12 +13,23 @@ from click_aliases import ClickAliasedGroup
 
 
 ECIO_FILE = "/sys/kernel/debug/ec/ec0/io"
-IPC_FILE = "/tmp/omen-fand.PID"
+IPC_FILE = "/run/omen-fand.pid"
 DEVICE_FILE = "/sys/devices/virtual/dmi/id/product_name"
 CONFIG_FILE = "/etc/omen-fan/config.toml"
-BOOST_FILE = glob.glob("/sys/devices/platform/hp-wmi/hwmon/*/pwm1_enable")[0]
-FAN1_SPEED_FILE = glob.glob("/sys/devices/platform/hp-wmi/hwmon/*/fan1_input")[0]
-FAN2_SPEED_FILE = glob.glob("/sys/devices/platform/hp-wmi/hwmon/*/fan2_input")[0]
+
+
+def _resolve_hwmon(pattern):
+    matches = glob.glob(pattern)
+    if not matches:
+        print(f"  ERROR: hp-wmi hwmon not found: {pattern}")
+        print("  Is the hp-wmi module loaded? Try: modprobe hp-wmi")
+        sys.exit(1)
+    return matches[0]
+
+
+BOOST_FILE = _resolve_hwmon("/sys/devices/platform/hp-wmi/hwmon/*/pwm1_enable")
+FAN1_SPEED_FILE = _resolve_hwmon("/sys/devices/platform/hp-wmi/hwmon/*/fan1_input")
+FAN2_SPEED_FILE = _resolve_hwmon("/sys/devices/platform/hp-wmi/hwmon/*/fan2_input")
 
 FAN1_OFFSET = 52  # 0x34
 FAN2_OFFSET = 53  # 0x35
@@ -28,7 +39,7 @@ BOOST_OFFSET = 236  # 0xEC
 
 FAN1_SPEED_MAX = 55
 FAN2_SPEED_MAX = 57
-DEVICE_LIST = ["OMEN by HP Laptop 16"]
+DEVICE_LIST = ["OMEN by HP Laptop 16", "OMEN Laptop 15"]
 
 
 def is_root(state=0):
@@ -75,7 +86,7 @@ def startup_check():
         device_name = device_file.read()
 
     if (
-        any(devices not in device_name for devices in DEVICE_LIST)
+        all(device not in device_name for device in DEVICE_LIST)
         and doc["script"]["BYPASS_DEVICE_CHECK"] != 1
     ):
         print("  ERROR: Your laptop is not in the list of supported laptops")
@@ -255,7 +266,8 @@ def service_cli(arg):
                 print(f"  omen-fan service is already running with PID:{ipc.read()}")
         else:
             bios_control(False)
-            subprocess.Popen("omen-fand")
+            fand_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "omen-fand.py")
+            subprocess.Popen([sys.executable, fand_path])
             print("  omen-fan service has been started")
 
     elif arg in ["stop", "0"]:

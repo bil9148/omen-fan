@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 
+import logging
+import logging.handlers
 import os
 import signal
 import sys
+import time
 from time import sleep
 import tomlkit
 from bisect import bisect_left
 
+log = logging.getLogger("omen-fand")
+log.setLevel(logging.INFO)
+_handler = logging.handlers.SysLogHandler(address="/dev/log", facility=logging.handlers.SysLogHandler.LOG_DAEMON)
+_handler.setFormatter(logging.Formatter("omen-fand: %(message)s"))
+log.addHandler(_handler)
+
 ECIO_FILE = "/sys/kernel/debug/ec/ec0/io"
-IPC_FILE = "/tmp/omen-fand.PID"
+IPC_FILE = "/run/omen-fand.pid"
 CONFIG_FILE = "/etc/omen-fan/config.toml"
 
 FAN1_OFFSET = 52  # 0x34
@@ -28,6 +37,26 @@ with open(CONFIG_FILE, "r") as file:
     IDLE_SPEED = doc["service"]["IDLE_SPEED"].unwrap()
     POLL_INTERVAL = doc["service"]["POLL_INTERVAL"].unwrap()
 
+# Validate config
+if len(TEMP_CURVE) != len(SPEED_CURVE):
+    print("  ERROR: TEMP_CURVE and SPEED_CURVE must have the same length.")
+    sys.exit(1)
+if len(TEMP_CURVE) < 2:
+    print("  ERROR: Curves must have at least 2 points.")
+    sys.exit(1)
+if not all(TEMP_CURVE[i] <= TEMP_CURVE[i + 1] for i in range(len(TEMP_CURVE) - 1)):
+    print("  ERROR: TEMP_CURVE must be in ascending order.")
+    sys.exit(1)
+if not all(0 <= s <= 100 for s in SPEED_CURVE):
+    print("  ERROR: SPEED_CURVE values must be between 0 and 100.")
+    sys.exit(1)
+if not 0 <= IDLE_SPEED <= 100:
+    print("  ERROR: IDLE_SPEED must be between 0 and 100.")
+    sys.exit(1)
+if POLL_INTERVAL <= 0:
+    print("  ERROR: POLL_INTERVAL must be greater than 0.")
+    sys.exit(1)
+
 # Precalculate slopes to reduce compute time.
 slope = []
 for i in range(1, len(TEMP_CURVE)):
@@ -45,7 +74,11 @@ def is_root():
 
 
 def sig_handler(signum, frame):
-    os.remove("/tmp/omen-fand.PID")
+    log.info("received signal %d, shutting down", signum)
+    try:
+        os.remove(IPC_FILE)
+    except OSError:
+        pass
     bios_control(True)
     sys.exit()
 
@@ -86,30 +119,69 @@ def bios_control(enabled):
 
 
 signal.signal(signal.SIGTERM, sig_handler)
+signal.signal(signal.SIGINT, sig_handler)
 
-with open(IPC_FILE, "w", encoding="utf-8") as ipc:
-    ipc.write(str(os.getpid()))
+fd = os.open(IPC_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+os.write(fd, str(os.getpid()).encode())
+os.close(fd)
+
+BIOS_REFRESH_INTERVAL = 60  # seconds — EC timer is 120s, refresh at half that
+
+HYSTERESIS = 2  # °C — ignore temp changes smaller than this
 
 speed_old = -1
+temp_old = -1
 is_root()
+log.info("starting (pid=%d, poll=%.1fs, curve=%s/%s)", os.getpid(), POLL_INTERVAL, TEMP_CURVE, SPEED_CURVE)
+bios_control(False)
 
-while True:
-    temp = get_temp()
+try:
+    last_bios_refresh = time.monotonic()
+    while True:
+        temp = get_temp()
 
-    if temp <= TEMP_CURVE[0]:
-        speed = IDLE_SPEED
-    elif temp >= TEMP_CURVE[-1]:
-        speed = SPEED_CURVE[-1]
-    else:
-        i = bisect_left(TEMP_CURVE, temp)
-        y0 = SPEED_CURVE[i - 1]
-        x0 = TEMP_CURVE[i - 1]
+        # Skip small oscillations, but always respond if temp rises above last curve point
+        if temp_old >= 0 and abs(temp - temp_old) < HYSTERESIS and temp < TEMP_CURVE[-1]:
+            now = time.monotonic()
+            if now - last_bios_refresh >= BIOS_REFRESH_INTERVAL:
+                bios_control(False)
+                last_bios_refresh = now
+            sleep(POLL_INTERVAL)
+            continue
 
-        speed = y0 + slope[i - 1] * (temp - x0)
+        temp_old = temp
 
-    if speed_old != speed:
-        speed_old = speed
-        update_fan(FAN1_MAX * speed / 100, FAN2_MAX * speed / 100)
+        if temp <= TEMP_CURVE[0]:
+            speed = IDLE_SPEED
+        elif temp >= TEMP_CURVE[-1]:
+            speed = SPEED_CURVE[-1]
+        else:
+            i = bisect_left(TEMP_CURVE, temp)
+            y0 = SPEED_CURVE[i - 1]
+            x0 = TEMP_CURVE[i - 1]
 
-    bios_control(False)
-    sleep(POLL_INTERVAL)
+            speed = y0 + slope[i - 1] * (temp - x0)
+
+        if speed_old != speed:
+            fan1 = int(FAN1_MAX * speed / 100)
+            fan2 = int(FAN2_MAX * speed / 100)
+            log.info("temp=%d°C speed=%.0f%% fan1=%d fan2=%d", temp, speed, fan1 * 100, fan2 * 100)
+            speed_old = speed
+            update_fan(FAN1_MAX * speed / 100, FAN2_MAX * speed / 100)
+
+        now = time.monotonic()
+        if now - last_bios_refresh >= BIOS_REFRESH_INTERVAL:
+            bios_control(False)
+            last_bios_refresh = now
+
+        sleep(POLL_INTERVAL)
+except Exception:
+    log.exception("unhandled exception")
+    raise
+finally:
+    log.info("restoring BIOS fan control")
+    try:
+        os.remove(IPC_FILE)
+    except OSError:
+        pass
+    bios_control(True)
